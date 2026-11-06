@@ -1,0 +1,65 @@
+name: build-image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:          # build only (no push) to catch breakage early
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write    # lets GITHUB_TOKEN push to ghcr.io
+
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [cpu, cuda]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The CUDA image is large; free runner disk space before building it
+      - name: Free disk space
+        if: matrix.variant == 'cuda'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}                 # metadata-action lowercases the name for you
+          tags: |
+            type=raw,value=${{ matrix.variant }}
+            type=sha,prefix=,suffix=-${{ matrix.variant }}
+            type=ref,event=tag,suffix=-${{ matrix.variant }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            TORCH_VARIANT=${{ matrix.variant }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
